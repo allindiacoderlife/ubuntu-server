@@ -1,116 +1,99 @@
 #!/bin/bash
-# setup.sh - Automated Ubuntu chroot installer (server-only, VPS-style)
-# Works on rooted Termux + Busybox (Magisk)
+# setup.sh - Automated Ubuntu chroot installer (server-ready with SSH)
+# Works on rooted Android with Termux + Busybox (Magisk)
 
 set -e
 
 UBUNTU_VERSION="24.04.3"
 UBUNTU_PATH="/data/local/tmp/chrootubuntu"
-UBUNTU_TARBALL="$HOME/ubuntu.tar.gz"
+UBUNTU_TARBALL="ubuntu.tar.gz"
 UBUNTU_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/${UBUNTU_VERSION}/release/ubuntu-base-${UBUNTU_VERSION}-base-arm64.tar.gz"
-START_SCRIPT="/data/local/start-ubuntu.sh"
-STOP_SCRIPT="/data/local/stop-ubuntu.sh"
 
-# --- Termux dependencies ---
-echo "[*] Installing Termux dependencies..."
+echo "[*] Updating Termux packages..."
 pkg update -y
-pkg install -y root-repo tsu curl wget nano vim git net-tools openssh busybox coreutils
+pkg install -y root-repo tsu curl wget nano vim git net-tools pulseaudio
 
-# --- Create chroot dir ---
+echo "[*] Switching to root..."
+su <<'EOF'
+set -e
+
+UBUNTU_VERSION="24.04.3"
+UBUNTU_PATH="/data/local/tmp/chrootubuntu"
+UBUNTU_TARBALL="ubuntu.tar.gz"
+UBUNTU_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/${UBUNTU_VERSION}/release/ubuntu-base-${UBUNTU_VERSION}-base-arm64.tar.gz"
+
 echo "[*] Creating chroot directory..."
-su -c "mkdir -p $UBUNTU_PATH $UBUNTU_PATH/dev/pts $UBUNTU_PATH/dev/shm $UBUNTU_PATH/proc $UBUNTU_PATH/sys $UBUNTU_PATH/sdcard"
+mkdir -p ${UBUNTU_PATH}
+cd ${UBUNTU_PATH}
 
-# --- Download rootfs safely ---
-if [ ! -f "$UBUNTU_TARBALL" ]; then
-    echo "[*] Downloading Ubuntu $UBUNTU_VERSION rootfs..."
-    curl -L "$UBUNTU_URL" -o "$UBUNTU_TARBALL"
+if [ ! -f "/data/local/tmp/${UBUNTU_TARBALL}" ]; then
+    echo "[*] Downloading Ubuntu ${UBUNTU_VERSION} rootfs..."
+    curl -L ${UBUNTU_URL} --output /data/local/tmp/${UBUNTU_TARBALL}
 fi
 
-# --- Extract rootfs ---
 echo "[*] Extracting Ubuntu rootfs..."
-su -c "cd $UBUNTU_PATH && tar xpf $UBUNTU_TARBALL --numeric-owner"
+tar xpvf /data/local/tmp/${UBUNTU_TARBALL} --numeric-owner
 
-# --- Start script ---
-echo "[*] Creating start script..."
-su -c "cat > '$START_SCRIPT' <<'EOF'
-#!/system/bin/sh
-UBUNTU_PATH=\"$UBUNTU_PATH\"
+mkdir -p sdcard dev/shm
 
-# Mount system directories
-mountpoint -q \$UBUNTU_PATH/proc || busybox mount -t proc proc \$UBUNTU_PATH/proc
-mountpoint -q \$UBUNTU_PATH/sys  || busybox mount -t sysfs sysfs \$UBUNTU_PATH/sys
-mountpoint -q \$UBUNTU_PATH/dev  || busybox mount --bind /dev \$UBUNTU_PATH/dev
-mountpoint -q \$UBUNTU_PATH/dev/pts || busybox mount -t devpts devpts \$UBUNTU_PATH/dev/pts
-mountpoint -q \$UBUNTU_PATH/dev/shm || busybox mount -t tmpfs -o size=256M tmpfs \$UBUNTU_PATH/dev/shm
-mountpoint -q \$UBUNTU_PATH/sdcard || busybox mount --bind /sdcard \$UBUNTU_PATH/sdcard
+# --- Networking + Hostname Fix ---
+echo "nameserver 8.8.8.8" > ${UBUNTU_PATH}/etc/resolv.conf
+echo "localhost" > ${UBUNTU_PATH}/etc/hostname
+echo "127.0.0.1 localhost" > ${UBUNTU_PATH}/etc/hosts
 
-# DNS
-echo 'nameserver 8.8.8.8' > \$UBUNTU_PATH/etc/resolv.conf
-echo '127.0.0.1 localhost' > \$UBUNTU_PATH/etc/hosts
+# --- Auto-install SSH + Essentials on First Boot ---
+cat > ${UBUNTU_PATH}/root/firstboot.sh <<'EOS'
+#!/bin/bash
+set -e
+apt update
+DEBIAN_FRONTEND=noninteractive apt install -y sudo wget curl iproute2 net-tools \
+    openssh-server nano vim git locales
+locale-gen en_US.UTF-8
+# Set root password (default: root)
+echo "root:root" | chpasswd
+EOS
+chmod +x ${UBUNTU_PATH}/root/firstboot.sh
 
-FIRSTBOOT_FLAG=\$UBUNTU_PATH/.firstboot_done
+# --- Start Script ---
+cd /data/local/tmp
+cat > start.sh <<'EOS'
+#!/bin/sh
+UBUNTUPATH="/data/local/tmp/chrootubuntu"
 
-if [ ! -f \"\$FIRSTBOOT_FLAG\" ]; then
-    echo '[*] First boot: configuring Ubuntu...'
-    busybox chroot \$UBUNTU_PATH /bin/bash -lc \"
-        set -e
-        export DEBIAN_FRONTEND=noninteractive
-        apt update
-        apt -y upgrade
-        apt -y install sudo bash coreutils ca-certificates curl wget vim nano git net-tools iproute2 openssh-server locales tzdata
+# Fix setuid issue
+busybox mount -o remount,dev,suid /data
 
-        # locale/timezone
-        locale-gen en_US.UTF-8 || true
-        ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+# Bind mounts
+for fs in dev sys proc; do
+    busybox mount --bind /$fs $UBUNTUPATH/$fs
+done
+busybox mount -t devpts devpts $UBUNTUPATH/dev/pts
+busybox mount -t tmpfs -o size=256M tmpfs $UBUNTUPATH/dev/shm
+busybox mount --bind /sdcard $UBUNTUPATH/sdcard
 
-        # ubuntu user
-        id -u ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu
-        echo 'ubuntu:ubuntu' | chpasswd
-        mkdir -p /etc/sudoers.d
-        echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-ubuntu
-        chmod 0440 /etc/sudoers.d/99-ubuntu
+# Networking fix
+cp /etc/resolv.conf $UBUNTUPATH/etc/resolv.conf
 
-        # enable SSH
-        mkdir -p /run/sshd
-        sed -i 's|[#]*PasswordAuthentication .*|PasswordAuthentication yes|' /etc/ssh/sshd_config
-    \"
-    touch \"\$FIRSTBOOT_FLAG\"
+# First boot setup
+if [ ! -f "$UBUNTUPATH/root/.vps_ready" ]; then
+    echo "[*] Running firstboot setup..."
+    busybox chroot $UBUNTUPATH /bin/bash /root/firstboot.sh
+    touch $UBUNTUPATH/root/.vps_ready
 fi
 
-# Entry
-MODE=\"\$1\"
-if [ \"\$MODE\" = 'root' ]; then
-    exec busybox chroot \$UBUNTU_PATH /bin/bash -l
-else
-    busybox chroot \$UBUNTU_PATH /usr/sbin/sshd -D -p 2222 &
-    exec busybox chroot \$UBUNTU_PATH /bin/su - ubuntu
-fi
-EOF"
+# Start SSH server
+mkdir -p $UBUNTUPATH/var/run/sshd
+busybox chroot $UBUNTUPATH /usr/sbin/sshd
 
-su -c "chmod +x $START_SCRIPT"
+# Start shell
+echo "[*] Starting Ubuntu chroot (VPS mode)..."
+busybox chroot $UBUNTUPATH /bin/bash
+EOS
 
-# --- Stop script ---
-echo "[*] Creating stop script..."
-su -c "cat > '$STOP_SCRIPT' <<'EOF'
-#!/system/bin/sh
-UBUNTU_PATH=\"$UBUNTU_PATH\"
-busybox fuser -km \$UBUNTU_PATH/dev/pts 2>/dev/null
-busybox umount \$UBUNTU_PATH/dev/pts 2>/dev/null
-busybox umount \$UBUNTU_PATH/dev/shm 2>/dev/null
-busybox umount \$UBUNTU_PATH/dev 2>/dev/null
-busybox umount \$UBUNTU_PATH/sys 2>/dev/null
-busybox umount \$UBUNTU_PATH/proc 2>/dev/null
-busybox umount \$UBUNTU_PATH/sdcard 2>/dev/null
-echo '[*] Chroot mounts stopped.'
-EOF"
+chmod +x start.sh
 
-su -c "chmod +x $STOP_SCRIPT"
-
-echo
-echo "✅ Ubuntu server installed!"
-echo "➤ Start Ubuntu (VPS-style): su -c $START_SCRIPT"
-echo "➤ Start as root:           su -c \"$START_SCRIPT root\""
-echo "➤ Stop/unmount:            su -c $STOP_SCRIPT"
-echo
-echo "SSH enabled on port 2222 inside chroot."
-echo "Login user: ubuntu   Password: ubuntu"
+echo "[*] Setup complete!"
+echo ">>> To start Ubuntu server, run:"
+echo "    su -c /data/local/tmp/start.sh"
+echo ">>> Default SSH login: root / root"
+EOF

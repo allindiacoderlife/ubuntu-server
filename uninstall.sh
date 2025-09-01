@@ -1,26 +1,40 @@
-#!/data/data/com.termux/files/usr/bin/bash
-# uninstall-ubuntu.sh - Remove Ubuntu chroot server
+#!/bin/bash
+# uninstall.sh - Remove Ubuntu chroot environment
+# Works on rooted Android with Termux + Busybox (Magisk)
 
 set -e
 
-CHROOT_DIR="/data/local/tmp/chrootubuntu"
-START_SCRIPT="/data/local/start-ubuntu.sh"
-STOP_SCRIPT="/data/local/stop-ubuntu.sh"
-TARBALL="/data/local/tmp/ubuntu.tar.gz"
+UBUNTU_PATH="/data/local/tmp/chrootubuntu"
+START_SCRIPT="/data/local/tmp/start.sh"
+UBUNTU_TARBALL="/data/local/tmp/ubuntu.tar.gz"
 
-echo "[*] Stopping any running Ubuntu chroot..."
-if [ -x "$STOP_SCRIPT" ]; then
-    su -c "$STOP_SCRIPT"
+echo "[*] Switching to root to unmount and delete Ubuntu..."
+su <<EOF
+set -e
+
+# Stop SSH if running
+if busybox chroot $UBUNTU_PATH /usr/bin/pgrep sshd >/dev/null 2>&1; then
+    echo "[*] Stopping sshd inside chroot..."
+    busybox chroot $UBUNTU_PATH /usr/bin/pkill sshd || true
 fi
 
-echo "[*] Removing chroot directory..."
-su -c "rm -rf $CHROOT_DIR"
+# Unmount bound filesystems
+for fs in dev/pts dev/shm dev sys proc sdcard; do
+    if mountpoint -q $UBUNTU_PATH/\$fs; then
+        echo "[*] Unmounting \$fs..."
+        busybox umount -l $UBUNTU_PATH/\$fs || true
+    fi
+done
 
-echo "[*] Removing start/stop scripts..."
-su -c "rm -f $START_SCRIPT $STOP_SCRIPT"
+# Remove Ubuntu rootfs
+if [ -d "$UBUNTU_PATH" ]; then
+    echo "[*] Deleting Ubuntu chroot directory..."
+    rm -rf "$UBUNTU_PATH"
+fi
 
-echo "[*] Removing downloaded rootfs tarball..."
-su -c "rm -f $TARBALL"
+# Remove start script and tarball
+rm -f "$START_SCRIPT"
+rm -f "$UBUNTU_TARBALL"
 
-echo "[*] Uninstall complete!"
-echo "✅ Ubuntu chroot server removed."
+echo "[*] Ubuntu chroot uninstalled successfully."
+EOF
