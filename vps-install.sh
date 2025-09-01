@@ -17,7 +17,7 @@ echo "[*] Switching to root..."
 su <<'EOF'
 set -e
 
-UBUNTU_VERSION="22.04"
+UBUNTU_VERSION="24.04.3"
 UBUNTU_PATH="/data/local/tmp/chrootubuntu"
 UBUNTU_TARBALL="ubuntu.tar.gz"
 UBUNTU_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/${UBUNTU_VERSION}/release/ubuntu-base-${UBUNTU_VERSION}-base-arm64.tar.gz"
